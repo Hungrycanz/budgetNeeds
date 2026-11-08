@@ -50,6 +50,8 @@ function App() {
   const [view, setView] = useState('overview')
   const [statusFilter, setStatusFilter] = useState('open')
   const [categoryFilter, setCategoryFilter] = useState('all')
+  const [scheduleFilter, setScheduleFilter] = useState('all')
+  const [sortBy, setSortBy] = useState('priority')
   const [query, setQuery] = useState('')
   const [modal, setModal] = useState(null)
   const [saving, setSaving] = useState(false)
@@ -92,10 +94,29 @@ function App() {
       || (statusFilter === 'open' && need.status !== 'fulfilled')
       || need.status === statusFilter
     const matchesCategory = categoryFilter === 'all' || String(need.category_id) === categoryFilter
+    const matchesSchedule = scheduleFilter === 'all'
+      || (need.is_recurring && need.recurrence_interval === scheduleFilter)
     const matchesQuery = `${need.title} ${need.description || ''} ${need.category?.name || ''}`
       .toLowerCase()
       .includes(query.toLowerCase())
-    return matchesStatus && matchesCategory && matchesQuery
+    return matchesStatus && matchesCategory && matchesSchedule && matchesQuery
+  }).sort((first, second) => {
+    if (sortBy === 'amount-asc') return Number(first.amount_needed) - Number(second.amount_needed)
+    if (sortBy === 'amount-desc') return Number(second.amount_needed) - Number(first.amount_needed)
+    if (sortBy === 'schedule') {
+      const scheduleOrder = { weekly: 0, monthly: 1, termly: 2 }
+      const firstSchedule = first.is_recurring ? scheduleOrder[first.recurrence_interval] ?? 3 : 4
+      const secondSchedule = second.is_recurring ? scheduleOrder[second.recurrence_interval] ?? 3 : 4
+      return firstSchedule - secondSchedule
+    }
+    if (sortBy === 'deadline') {
+      if (!first.deadline) return second.deadline ? 1 : 0
+      if (!second.deadline) return -1
+      return first.deadline.localeCompare(second.deadline)
+    }
+
+    const priority = { high: 0, medium: 1, low: 2 }
+    return (priority[first.priority] ?? 3) - (priority[second.priority] ?? 3)
   })
   const listNeeds = view === 'overview' ? visibleNeeds.slice(0, 5) : visibleNeeds
   const latestFund = funds[0]
@@ -271,6 +292,19 @@ function App() {
                   <option value="all">All categories</option>
                   {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
                 </select>
+                <select value={scheduleFilter} onChange={(event) => setScheduleFilter(event.target.value)} aria-label="Filter by schedule">
+                  <option value="all">All schedules</option>
+                  <option value="weekly">Weekly recurring</option>
+                  <option value="monthly">Monthly recurring</option>
+                  <option value="termly">Termly recurring</option>
+                </select>
+                <select value={sortBy} onChange={(event) => setSortBy(event.target.value)} aria-label="Sort needs">
+                  <option value="priority">Priority</option>
+                  <option value="schedule">Schedule (weekly to termly)</option>
+                  <option value="deadline">Deadline (soonest)</option>
+                  <option value="amount-asc">Amount needed (low to high)</option>
+                  <option value="amount-desc">Amount needed (high to low)</option>
+                </select>
               </div>
               <div className="filter-tabs" role="tablist" aria-label="Filter needs by status">
                 {[['open', 'Open'], ['funded', 'Funded'], ['fulfilled', 'Fulfilled'], ['all', 'Everything']].map(([value, label]) => (
@@ -324,7 +358,7 @@ function App() {
 
       {notice && <div className="toast" role="status"><CheckCircle2 size={17} /> {notice}</div>}
       {modal && <Modal title={modalTitle(modal)} onClose={() => setModal(null)}>
-        {modal.type === 'need' && <NeedForm need={modal.need} categories={categories} saving={saving} onSubmit={submitNeed} onAddCategory={() => setModal({ type: 'category' })} onCancel={() => setModal(null)} />}
+        {modal.type === 'need' && <NeedForm key={modal.need?.id ?? 'new'} need={modal.need} categories={categories} saving={saving} onSubmit={submitNeed} onAddCategory={() => setModal({ type: 'category' })} onCancel={() => setModal(null)} />}
         {modal.type === 'contribution' && <ContributionForm need={modal.need} saving={saving} onSubmit={submitContribution} onCancel={() => setModal(null)} />}
         {modal.type === 'fund' && <FundForm saving={saving} onSubmit={submitFund} onCancel={() => setModal(null)} />}
         {modal.type === 'category' && <CategoryForm saving={saving} onSubmit={submitCategory} onCancel={() => setModal(null)} />}
@@ -347,7 +381,7 @@ function NeedRow({ need, onEdit, onContribute, onDelete, onStatus }) {
         <div className="need-title-line"><h3>{need.title}</h3><span className={`status-badge status-${need.status}`}>{need.status}</span></div>
         <p className="need-description">{need.description || need.category?.name || 'No description'}</p>
         <div className="need-progress-line"><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><span className="progress-label">{progress}%</span></div>
-        <div className="need-meta"><span>{need.category?.name || 'Uncategorized'}</span><span className={`priority-label ${need.priority}`}>{need.priority} priority</span>{need.deadline && <span><CalendarDays size={13} /> {formatDate(need.deadline)}</span>}</div>
+        <div className="need-meta"><span>{need.category?.name || 'Uncategorized'}</span><span className={`priority-label ${need.priority}`}>{need.priority} priority</span>{need.is_recurring && <span className="recurrence-label">{need.recurrence_interval} recurring</span>}{need.deadline && <span><CalendarDays size={13} /> {formatDate(need.deadline)}</span>}</div>
       </div>
       <div className="need-amount"><strong>{money(saved)}</strong><span>of {money(target)}</span></div>
       <div className="need-actions">
@@ -372,13 +406,16 @@ function Modal({ title, onClose, children }) {
 }
 
 function NeedForm({ need, categories, saving, onSubmit, onAddCategory, onCancel }) {
+  const [isRecurring, setIsRecurring] = useState(Boolean(need?.is_recurring))
+  const [recurrenceInterval, setRecurrenceInterval] = useState(need?.recurrence_interval || '')
+
   return <form className="form-body" onSubmit={onSubmit}>
     <label>Need title<input name="title" defaultValue={need?.title} maxLength="150" required placeholder="e.g. Replace my laptop" /></label>
     <label>Description <span className="optional">optional</span><textarea name="description" defaultValue={need?.description || ''} rows="2" placeholder="A little more detail…" /></label>
     <div className="form-two-col"><label>Amount needed<input name="amount_needed" type="number" min="0.01" step="0.01" defaultValue={need?.amount_needed} required placeholder="0.00" /></label><label>Priority<select name="priority" defaultValue={need?.priority || 'medium'}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label></div>
     <div className="form-two-col"><label>Category<select name="category_id" defaultValue={need?.category_id || ''}><option value="">Uncategorized</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label>Target date<input name="deadline" type="date" defaultValue={need?.deadline || ''} /></label></div>
     <button type="button" className="inline-add" onClick={onAddCategory}><FolderPlus size={15} /> Create a category</button>
-    <div className="recurrence-control"><label className="checkbox-label"><input type="checkbox" name="is_recurring" defaultChecked={need?.is_recurring || false} /> This is a recurring need</label><select name="recurrence_interval" defaultValue={need?.recurrence_interval || 'monthly'} aria-label="Recurrence interval"><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="termly">Termly</option></select></div>
+    <div className="recurrence-control"><label className="checkbox-label"><input type="checkbox" name="is_recurring" checked={isRecurring} onChange={(event) => setIsRecurring(event.target.checked)} /> Repeat this need</label><select name="recurrence_interval" value={recurrenceInterval} onChange={(event) => setRecurrenceInterval(event.target.value)} aria-label="Recurrence interval" disabled={!isRecurring} required={isRecurring}><option value="">Choose interval</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="termly">Termly</option></select></div>
     <FormActions saving={saving} submitLabel={need ? 'Save changes' : 'Add need'} onCancel={onCancel} />
   </form>
 }
